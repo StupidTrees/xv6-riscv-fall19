@@ -144,6 +144,7 @@ freeproc(struct proc *p)
   p->name[0] = 0;
   p->chan = 0;
   p->killed = 0;
+  p->xstate = 0;
   p->state = UNUSED;
 }
 
@@ -234,9 +235,7 @@ growproc(int n)
       return -1;
     }
   } else if(n < 0){
-    if((sz = uvmdealloc(p->pagetable, sz, sz + n)) == 0) {
-      return -1;
-    }
+    sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
   return 0;
@@ -290,11 +289,11 @@ fork(void)
 }
 
 // Pass p's abandoned children to init.
-// Caller must hold p->lock and parent->lock.
+// Caller must hold p->lock.
 void
-reparent(struct proc *p, struct proc *parent) {
+reparent(struct proc *p)
+{
   struct proc *pp;
-  int child_of_init = (p->parent == initproc);
 
   for(pp = proc; pp < &proc[NPROC]; pp++){
     // this code uses pp->parent without holding pp->lock.
@@ -306,13 +305,10 @@ reparent(struct proc *p, struct proc *parent) {
       // because only the parent changes it, and we're the parent.
       acquire(&pp->lock);
       pp->parent = initproc;
-      if(pp->state == ZOMBIE) {
-        if(!child_of_init)
-          acquire(&initproc->lock);
-        wakeup1(initproc);
-        if(!child_of_init)
-          release(&initproc->lock);
-      }
+      // we should wake up init here, but that would require
+      // initproc->lock, which would be a deadlock, since we hold
+      // the lock on one of init's children (pp). this is why
+      // exit() always wakes init (before acquiring any locks).
       release(&pp->lock);
     }
   }
@@ -322,7 +318,7 @@ reparent(struct proc *p, struct proc *parent) {
 // An exited process remains in the zombie state
 // until its parent calls wait().
 void
-exit(void)
+exit(int status)
 {
   struct proc *p = myproc();
 
@@ -343,19 +339,41 @@ exit(void)
   end_op(ROOTDEV);
   p->cwd = 0;
 
-  acquire(&p->parent->lock);
+  // we might re-parent a child to init. we can't be precise about
+  // waking up init, since we can't acquire its lock once we've
+  // acquired any other proc lock. so wake up init whether that's
+  // necessary or not. init may miss this wakeup, but that seems
+  // harmless.
+  acquire(&initproc->lock);
+  wakeup1(initproc);
+  release(&initproc->lock);
+
+  // grab a copy of p->parent, to ensure that we unlock the same
+  // parent we locked. in case our parent gives us away to init while
+  // we're waiting for the parent lock. we may then race with an
+  // exiting parent, but the result will be a harmless spurious wakeup
+  // to a dead or wrong process; proc structs are never re-allocated
+  // as anything else.
+  acquire(&p->lock);
+  struct proc *original_parent = p->parent;
+  release(&p->lock);
+  
+  // we need the parent's lock in order to wake it up from wait().
+  // the parent-then-child rule says we have to lock it first.
+  acquire(&original_parent->lock);
 
   acquire(&p->lock);
 
   // Give any children to init.
-  reparent(p, p->parent);
+  reparent(p);
 
   // Parent might be sleeping in wait().
-  wakeup1(p->parent);
+  wakeup1(original_parent);
 
+  p->xstate = status;
   p->state = ZOMBIE;
 
-  release(&p->parent->lock);
+  release(&original_parent->lock);
 
   // Jump into the scheduler, never to return.
   sched();
@@ -365,7 +383,7 @@ exit(void)
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
 int
-wait(void)
+wait(uint64 addr)
 {
   struct proc *np;
   int havekids, pid;
@@ -390,6 +408,12 @@ wait(void)
         if(np->state == ZOMBIE){
           // Found one.
           pid = np->pid;
+          if(addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
+                                  sizeof(np->xstate)) < 0) {
+            release(&np->lock);
+            release(&p->lock);
+            return -1;
+          }
           freeproc(np);
           release(&np->lock);
           release(&p->lock);
@@ -425,8 +449,13 @@ scheduler(void)
   
   c->proc = 0;
   for(;;){
-    // Avoid deadlock by ensuring that devices can interrupt.
+    // Avoid deadlock by giving devices a chance to interrupt.
     intr_on();
+
+    // Run the for loop with interrupts off to avoid
+    // a race between an interrupt and WFI, which would
+    // cause a lost wakeup.
+    intr_off();
 
     int found = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
@@ -445,10 +474,14 @@ scheduler(void)
 
         found = 1;
       }
+
+      // ensure that release() doesn't enable interrupts.
+      // again to avoid a race between interrupt and WFI.
+      c->intena = 0;
+
       release(&p->lock);
     }
     if(found == 0){
-      intr_on();
       asm volatile("wfi");
     }
   }
@@ -568,6 +601,8 @@ wakeup(void *chan)
 static void
 wakeup1(struct proc *p)
 {
+  if(!holding(&p->lock))
+    panic("wakeup1");
   if(p->chan == p && p->state == SLEEPING) {
     p->state = RUNNABLE;
   }

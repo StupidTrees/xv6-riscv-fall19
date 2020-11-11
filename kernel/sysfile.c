@@ -246,6 +246,7 @@ create(char *path, short type, short major, short minor)
 
   if((dp = nameiparent(path, name)) == 0)
     return 0;
+
   ilock(dp);
 
   if((ip = dirlookup(dp, name, 0)) != 0){
@@ -289,8 +290,9 @@ sys_open(void)
   int fd, omode;
   struct file *f;
   struct inode *ip;
+  int n;
 
-  if(argstr(0, path, MAXPATH) < 0 || argint(1, &omode) < 0)
+  if((n = argstr(0, path, MAXPATH)) < 0 || argint(1, &omode) < 0)
     return -1;
 
   begin_op(ROOTDEV);
@@ -331,11 +333,12 @@ sys_open(void)
   if(ip->type == T_DEVICE){
     f->type = FD_DEVICE;
     f->major = ip->major;
+    f->minor = ip->minor;
   } else {
     f->type = FD_INODE;
-    f->off = 0;
   }
   f->ip = ip;
+  f->off = 0;
   f->readable = !(omode & O_WRONLY);
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
 
@@ -419,10 +422,10 @@ sys_exec(void)
   memset(argv, 0, sizeof(argv));
   for(i=0;; i++){
     if(i >= NELEM(argv)){
-      return -1;
+      goto bad;
     }
     if(fetchaddr(uargv+sizeof(uint64)*i, (uint64*)&uarg) < 0){
-      return -1;
+      goto bad;
     }
     if(uarg == 0){
       argv[i] = 0;
@@ -432,7 +435,7 @@ sys_exec(void)
     if(argv[i] == 0)
       panic("sys_exec kalloc");
     if(fetchstr(uarg, argv[i], PGSIZE) < 0){
-      return -1;
+      goto bad;
     }
   }
 
@@ -442,6 +445,11 @@ sys_exec(void)
     kfree(argv[i]);
 
   return ret;
+
+ bad:
+  for(i = 0; i < NELEM(argv) && argv[i] != 0; i++)
+    kfree(argv[i]);
+  return -1;
 }
 
 uint64
@@ -475,21 +483,3 @@ sys_pipe(void)
   return 0;
 }
 
-// system call to test crashes
-uint64
-sys_crash(void)
-{
-  char path[MAXPATH];
-  struct inode *ip;
-  int crash;
-  
-  if(argstr(0, path, MAXPATH) < 0 || argint(1, &crash) < 0)
-    return -1;
-  ip = create(path, T_FILE, 0, 0);
-  if(ip == 0){
-    return -1;
-  }
-  iunlockput(ip);
-  crash_op(ip->dev, crash);
-  return 0;
-}
