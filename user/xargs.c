@@ -8,7 +8,6 @@ int main(int argc, char *argv[]) {
 
     if (argc < 2) {
         fprintf(2, "xargs: no params provided\n");
-        exit(0);
     }
 
     //将输入参数保存

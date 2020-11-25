@@ -12,7 +12,7 @@ void pass(int pdLast[]) {
     if(!r || p<0){
         return;
     }
-    printf("prime %d\n", p, pdLast);
+    printf("prime %d -- %d\n", p, pdLast);
     if (p == 0) {
         return;
     }

@@ -8,12 +8,12 @@ int main(int argc, char *argv[]) {
     char buf[64];
 
     if (fork()) {
-        // 父进程
+        // Parent
         write(parent_fd[1], "ping", strlen("ping"));
         read(child_fd[0], buf, 4);
         printf("%d: received %s\n", getpid(), buf);
     } else {
-        // 子进程
+        // Child
         read(parent_fd[0], buf, 4);
         printf("%d: received %s\n", getpid(), buf);
         write(child_fd[1], "pong", strlen("pong"));
